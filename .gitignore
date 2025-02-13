@@ -1,0 +1,22 @@
+test.py
+
+achievements.json
+app_settings.json
+breathing_stats.json
+notification_settings.json
+
+# Distribution / packaging
+dist/
+build/
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Zip files
+zip_releases/
+*.zip
+*.rar
+*.7z
