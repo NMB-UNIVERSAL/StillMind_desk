@@ -4,6 +4,8 @@ achievements.json
 app_settings.json
 breathing_stats.json
 notification_settings.json
+startup_test.txt
+stillmind_log.txt
 
 # Distribution / packaging
 dist/
