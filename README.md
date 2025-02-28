@@ -1,7 +1,6 @@
 # StillMind
 
-A tool for helping people with mental health issues.
-
+A simple breathing exercise app to help you relax and reduce stress.
 ## Features
 
 - 4-7-8 breathing
