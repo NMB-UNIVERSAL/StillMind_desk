@@ -209,6 +209,9 @@ class App(ctk.CTk):
         # Initialize data_handler as None at start
         self.data_handler = None
         
+        # Set up proper window close handling
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
         # Set default theme
         ctk.set_appearance_mode("dark")
         
@@ -391,26 +394,25 @@ class App(ctk.CTk):
             self.notification_manager.set_data_handler(self.data_handler)
 
     def on_closing(self):
-        """Handle cleanup when window is closed"""
+        """Handle proper shutdown of the application"""
         try:
-            # Stop all sounds
-            mixer.music.stop()
+            # Stop any playing sounds
             mixer.quit()
             
-            # Stop notification thread
+            # Stop notification thread if running
             if hasattr(self, 'notification_manager'):
                 self.notification_manager.stop_notification_thread()
             
+            # Stop any other background threads here
+            
             # Destroy the window
-            self.quit()
             self.destroy()
             
-            # Force exit the application
-            sys.exit()
-            
+            # Force exit the program
+            os._exit(0)
         except Exception as e:
-            logging.error(f"Error during cleanup: {e}")
-            sys.exit()
+            print(f"Error during shutdown: {e}")
+            os._exit(1)
 
 def get_button_color():
     """Returns the appropriate button color based on the current theme"""

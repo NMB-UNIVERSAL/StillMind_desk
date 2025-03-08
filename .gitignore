@@ -1,5 +1,8 @@
 test.py
 
+main.dist
+main.build
+
 achievements.json
 app_settings.json
 breathing_stats.json
