@@ -22,3 +22,4 @@ zip_releases/
 *.zip
 *.rar
 *.7z
+.env

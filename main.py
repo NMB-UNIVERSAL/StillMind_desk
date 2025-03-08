@@ -32,11 +32,19 @@ try:
     from datetime import datetime, timedelta
     import platform
     import subprocess
+    from supabase import create_client, Client
+    from dotenv import load_dotenv
+
 except Exception as e:
     with open('startup_error.txt', 'w') as f:
         traceback.print_exc(file=f)
     print("Error during startup! Check startup_error.txt")
     input("Press Enter to exit...")
+
+load_dotenv()
+url = os.environ.get("SUPABASE_URL")
+key = os.environ.get("SUPABASE_KEY")
+supabase = create_client(url, key)
 
 # Set up logging
 def setup_logging():
@@ -196,66 +204,192 @@ class BackgroundCanvas(ctk.CTkCanvas):
 
 class App(ctk.CTk):
     def __init__(self):
-        logging.info("Starting StillMind application")
-        with open("startup_test.txt", "w") as f:
-            f.write("Program started\n")
-            f.write(f"Running from: {os.getcwd()}\n")
-            f.write(f"Executable path: {sys.executable}\n")
-        try:
-            super().__init__()
-            logging.info("Initialized parent class")
-            
-            # Log resource paths
-            logging.info(f"Current working directory: {os.getcwd()}")
-            logging.info(f"Executable path: {sys.executable if getattr(sys, 'frozen', False) else 'Running in development'}")
-            
-            # Continue with your initialization
-            self.title("StillMind")
-            logging.info("Set window title")
-            
-            self.geometry("800x600")
-            icon_path = get_resource_path("StillMind_icon.ico")
-            if os.path.exists(icon_path):
-                self.iconbitmap(icon_path)
-            
-            # Initialize notification manager and start thread
-            self.notification_manager = NotificationManager()
-            self.notification_manager.start_notification_thread()
-            
-            self.container = ctk.CTkFrame(self)
-            self.container.pack(side="top", fill="both", expand=True)
-            
-            self.container.grid_rowconfigure(0, weight=1)
-            self.container.grid_columnconfigure(0, weight=1)
-            
-            self.frames = {}
-            
-            for F in (StartingPage, MainPage, StatsPage, SettingsPage, AchievementsPage, HelpPage):
-                frame = F(self.container, self)
-                self.frames[F] = frame
-                frame.grid(row=0, column=0, sticky="nsew")
-            
+        super().__init__()
+        
+        # Initialize data_handler as None at start
+        self.data_handler = None
+        
+        # Set default theme
+        ctk.set_appearance_mode("dark")
+        
+        self.title("StillMind")
+        self.geometry("800x600")
+        self.resizable(False, False)
+        
+        # Initialize notification manager and connect data_handler later after login
+        self.notification_manager = NotificationManager()
+        self.notification_manager.start_notification_thread()
+        
+        # Create container
+        self.container = ctk.CTkFrame(self)
+        self.container.pack(side="top", fill="both", expand=True)
+        self.container.grid_rowconfigure(0, weight=1)
+        self.container.grid_columnconfigure(0, weight=1)
+        
+        # Check for saved session BEFORE creating frames
+        self.check_saved_session()
+        
+        # Initialize frames dictionary
+        self.frames = {}
+        
+        # Add all pages to the frames dictionary
+        for F in (LoginPage, StartingPage, MainPage, StatsPage, SettingsPage, AchievementsPage, HelpPage, AccountPage):
+            frame = F(self.container, self)
+            self.frames[F] = frame
+            frame.grid(row=0, column=0, sticky="nsew")
+        
+        # Show the starting frame based on login state
+        if self.data_handler:
+            print("Auto-login successful, showing StartingPage")
             self.show_frame(StartingPage)
-            
-            # Bind the closing event
-            self.protocol("WM_DELETE_WINDOW", self.on_closing)
-            
+            # Apply theme if user is already logged in
+            self.apply_theme_from_settings()
+        else:
+            print("No active session, showing LoginPage")
+            self.show_frame(LoginPage)
+
+    def check_saved_session(self):
+        """Check for saved login session and auto-login if valid"""
+        try:
+            # Check if session file exists
+            session_file = os.path.join(os.path.expanduser("~"), ".stillmind_session")
+            if os.path.exists(session_file):
+                with open(session_file, "r") as f:
+                    session_data = json.load(f)
+                
+                # Check if session is not expired
+                expires_at = datetime.fromisoformat(session_data.get("expires_at", "2000-01-01"))
+                if expires_at > datetime.now():
+                    # Try to restore session
+                    user_id = session_data.get("user_id")
+                    access_token = session_data.get("access_token")
+                    refresh_token = session_data.get("refresh_token")
+                    
+                    if user_id and access_token and refresh_token:
+                        # Set Supabase access token
+                        try:
+                            # Set the session with both tokens
+                            supabase.auth.set_session(access_token, refresh_token)
+                            
+                            # Initialize data handler
+                            self.data_handler = DataHandling(user_id)
+                            print(f"Auto-login successful for user: {user_id}")
+                            return
+                        except Exception as e:
+                            print(f"Error restoring session: {e}")
         except Exception as e:
-            logging.error(f"Error during initialization: {str(e)}", exc_info=True)
-            raise
-    
+            print(f"Error during auto-login: {e}")
+        
+        # If we get here, no valid session was found
+        self.data_handler = None
+        
+    def save_session(self, user_id, access_token, refresh_token, expires_at):
+        """Save login session for auto-login"""
+        try:
+            session_data = {
+                "user_id": user_id,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "expires_at": expires_at.isoformat()
+            }
+            
+            session_file = os.path.join(os.path.expanduser("~"), ".stillmind_session")
+            with open(session_file, "w") as f:
+                json.dump(session_data, f)
+            
+            print(f"Session saved for user: {user_id}")
+        except Exception as e:
+            print(f"Error saving session: {e}")
+
+    def logout(self):
+        """Log out the current user"""
+        try:
+            # Clear Supabase session
+            supabase.auth.sign_out()
+            
+            # Clear data handler
+            self.data_handler = None
+            
+            # Remove session file
+            session_file = os.path.join(os.path.expanduser("~"), ".stillmind_session")
+            if os.path.exists(session_file):
+                os.remove(session_file)
+            
+            # Stop sounds
+            if MainPage in self.frames:
+                self.frames[MainPage].stop_all_sounds()
+            
+            # Show login page
+            self.show_frame(LoginPage)
+            
+            print("Logout successful")
+        except Exception as e:
+            print(f"Error during logout: {e}")
+
+    def apply_theme_from_settings(self):
+        """Load and apply theme and sound settings from database settings"""
+        if self.data_handler:
+            settings = self.data_handler.get_settings()
+            
+            # Apply theme
+            theme = settings.get('theme', 'dark')
+            ctk.set_appearance_mode(theme)
+            
+            # Apply sound settings
+            should_play_sound = settings.get('sound', True)
+            if MainPage in self.frames:
+                self.frames[MainPage].toggle_background_music(should_play_sound)
+            
+            # Update button colors
+            button_color = get_button_color()
+            for frame in self.frames.values():
+                for widget in frame.winfo_children():
+                    if isinstance(widget, ctk.CTkButton):
+                        widget.configure(fg_color=button_color)
+                        
+            # Update all background canvases
+            for frame in self.frames.values():
+                if hasattr(frame, 'bg_canvas'):
+                    frame.bg_canvas.update_background_color()
+
     def show_frame(self, cont):
         frame = self.frames[cont]
         frame.tkraise()
+        
+        # Update frame-specific content
+        if cont == AccountPage:
+            # Refresh account page content when shown
+            if hasattr(frame, 'load_user_info'):
+                frame.load_user_info()
+                
         if hasattr(frame, 'bg_canvas'):
             frame.bg_canvas.update_background_color()
+        
+        # Other existing show_frame code...
         if cont == MainPage:
+            # Reload settings from database before showing the page
+            if self.data_handler:
+                self.frames[MainPage].settings = self.data_handler.get_settings()
+                # Apply sound settings
+                should_play_sound = self.frames[MainPage].settings.get('sound', True)
+                self.frames[MainPage].toggle_background_music(should_play_sound)
             self.frames[MainPage].create_progress_indicators()
             self.frames[MainPage].start_countdown()
         elif cont == StatsPage:
             self.frames[MainPage].stop_exercise()
             self.frames[StatsPage].update_graph()
-    
+        elif cont == SettingsPage:
+            # Refresh settings when entering settings page
+            if self.data_handler:
+                self.frames[SettingsPage].refresh_settings_from_database()
+        elif cont == AchievementsPage:
+            # Refresh achievements when showing achievements page
+            self.frames[AchievementsPage].update_achievements()
+            
+        # Update notification manager if data_handler exists
+        if self.data_handler:
+            self.notification_manager.set_data_handler(self.data_handler)
+
     def on_closing(self):
         """Handle cleanup when window is closed"""
         try:
@@ -283,6 +417,222 @@ def get_button_color():
     if ctk.get_appearance_mode() == "Dark":
         return "#766E7A"
     return "#859FBB"
+
+class LoginPage(ctk.CTkFrame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+
+        # Set up background canvas (optional, for consistency)
+        self.bg_canvas = BackgroundCanvas(self)
+        self.bg_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        # Title for the account page
+        self.title_label = ctk.CTkLabel(
+            self, text="Account System", font=("Arial", 30, "bold")
+        )
+        self.title_label.place(relx=0.5, rely=0.1, anchor="center")
+
+        # Email entry
+        self.email_entry = ctk.CTkEntry(
+            self, placeholder_text="Email", width=300, font=("Arial", 16)
+        )
+        self.email_entry.place(relx=0.5, rely=0.3, anchor="center")
+
+        # Password entry (with masking)
+        self.password_entry = ctk.CTkEntry(
+            self, placeholder_text="Password", show="*", width=300, font=("Arial", 16)
+        )
+        self.password_entry.place(relx=0.5, rely=0.4, anchor="center")
+
+        # Sign Up button
+        self.signup_button = ctk.CTkButton(
+            self,
+            text="Sign Up",
+            width=140,
+            command=self.sign_up
+        )
+        self.signup_button.place(relx=0.35, rely=0.5, anchor="center")
+
+        # Sign In button
+        self.signin_button = ctk.CTkButton(
+            self,
+            text="Sign In",
+            width=140,
+            command=self.sign_in
+        )
+        self.signin_button.place(relx=0.65, rely=0.5, anchor="center")
+
+        # Message label for feedback
+        self.message_label = ctk.CTkLabel(
+            self, text="", font=("Arial", 14)
+        )
+        self.message_label.place(relx=0.5, rely=0.6, anchor="center")
+
+        # Back button to return to StartingPage
+        self.back_button = ctk.CTkButton(
+            self,
+            text="Back",
+            image=ctk.CTkImage(Image.open(get_resource_path("icons/back.png")), size=(20, 20)),
+            command=lambda: controller.show_frame(StartingPage)
+        )
+        self.back_button.place(relx=0.5, rely=0.9, anchor="center")
+        self.back_button.lift()
+
+    def sign_up(self):
+        # Get user input from entries
+        email = self.email_entry.get().strip()
+        password = self.password_entry.get().strip()
+        if not email or not password:
+            self.message_label.configure(text="Please enter both email and password.")
+            return
+
+        try:
+            # Call Supabase auth API for sign up
+            response = supabase.auth.sign_up({"email": email, "password": password})
+            resp = response.dict()  # Convert the Pydantic model to a dictionary
+            if resp.get("error"):
+                err = resp["error"]["message"]
+                self.message_label.configure(text=f"Sign up failed: {err}")
+            else:
+                self.message_label.configure(text="Sign up successful, now just click sign in")
+        except Exception as e:
+            self.message_label.configure(text=f"Error: {str(e)}")
+
+    def sign_in(self):
+        # Get user input from entries
+        email = self.email_entry.get().strip()
+        password = self.password_entry.get().strip()
+        if not email or not password:
+            self.message_label.configure(text="Please enter both email and password.")
+            return
+
+        try:
+            # Call Supabase auth API for sign in
+            response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+            resp = response.dict()  # Convert to a dictionary for easier access
+            if resp.get("error"):
+                err = resp["error"]["message"]
+                self.message_label.configure(text=f"Login failed: {err}")
+            else:
+                self.message_label.configure(text="Login successful!")
+                current_user_id = resp.get("user", {}).get("id")
+                if current_user_id:
+                    self.controller.data_handler = DataHandling(current_user_id)
+                    
+                    # Save session for auto-login
+                    access_token = resp.get("session", {}).get("access_token")
+                    refresh_token = resp.get("session", {}).get("refresh_token")
+                    expires_at_value = resp.get("session", {}).get("expires_at")
+                    
+                    if access_token and refresh_token and expires_at_value is not None:
+                        # Handle expires_at which could be an integer (timestamp) or string
+                        if isinstance(expires_at_value, int):
+                            # Unix timestamp (seconds since epoch)
+                            expires_at = datetime.fromtimestamp(expires_at_value)
+                        else:
+                            # ISO format string
+                            try:
+                                # Handle different string formats
+                                if isinstance(expires_at_value, str) and 'Z' in expires_at_value:
+                                    expires_at_value = expires_at_value.replace('Z', '+00:00')
+                                expires_at = datetime.fromisoformat(str(expires_at_value))
+                            except ValueError:
+                                # Fallback - set expiry to 7 days from now
+                                expires_at = datetime.now() + timedelta(days=7)
+                
+                        self.controller.save_session(current_user_id, access_token, refresh_token, expires_at)
+                    
+                    # Apply theme after login
+                    self.controller.apply_theme_from_settings()
+                    self.controller.show_frame(StartingPage)
+                else:
+                    self.message_label.configure(text="User ID not found in response")
+        except Exception as e:
+            self.message_label.configure(text=f"Error: {str(e)}")
+
+
+class DataHandling:
+    def __init__(self, user_id: str):
+        self.user_id = user_id
+
+    def get_settings(self) -> dict:
+        response = supabase.table('app_settings').select('*').eq('user_id', self.user_id).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]['settings']
+        else:
+            default_settings = {
+                'theme': 'dark',
+                'sound': True,
+                'breathing_times': {
+                    'inhale': 4,
+                    'hold': 7,
+                    'exhale': 8
+                },
+                'progress_style': 'bars'
+            }
+            supabase.table('app_settings').insert({'user_id': self.user_id, 'settings': default_settings}).execute()
+            return default_settings
+
+    def save_settings(self, settings: dict):
+        response = supabase.table('app_settings').select('*').eq('user_id', self.user_id).execute()
+        if response.data and len(response.data) > 0:
+            supabase.table('app_settings').update({'settings': settings}).eq('user_id', self.user_id).execute()
+        else:
+            supabase.table('app_settings').insert({'user_id': self.user_id, 'settings': settings}).execute()
+
+    def get_stats(self) -> dict:
+        response = supabase.table('breathing_stats').select('*').eq('user_id', self.user_id).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]['stats']
+        else:
+            default_stats = {}
+            supabase.table('breathing_stats').insert({'user_id': self.user_id, 'stats': default_stats}).execute()
+            return default_stats
+
+    def save_stats(self, stats: dict):
+        response = supabase.table('breathing_stats').select('*').eq('user_id', self.user_id).execute()
+        if response.data and len(response.data) > 0:
+            supabase.table('breathing_stats').update({'stats': stats}).eq('user_id', self.user_id).execute()
+        else:
+            supabase.table('breathing_stats').insert({'user_id': self.user_id, 'stats': stats}).execute()
+
+    def get_notification_settings(self) -> dict:
+        response = supabase.table('notification_settings').select('*').eq('user_id', self.user_id).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]['settings']
+        else:
+            default_notif = {'enabled': True, 'time': '09:00'}
+            supabase.table('notification_settings').insert({'user_id': self.user_id, 'settings': default_notif}).execute()
+            return default_notif
+
+    def save_notification_settings(self, notification_settings: dict):
+        response = supabase.table('notification_settings').select('*').eq('user_id', self.user_id).execute()
+        if response.data and len(response.data) > 0:
+            supabase.table('notification_settings').update({'settings': notification_settings}).eq('user_id', self.user_id).execute()
+        else:
+            supabase.table('notification_settings').insert({'user_id': self.user_id, 'settings': notification_settings}).execute()
+            
+    def get_achievements(self) -> dict:
+        response = supabase.table('achievements').select('*').eq('user_id', self.user_id).execute()
+        print(f"Achievement response: {response.data}")  # Debugging
+        
+        if response.data and len(response.data) > 0:
+            achievements = response.data[0]['achievements']
+            print(f"Loaded achievements: {achievements}")  # Debugging
+            return achievements
+        else:
+            default_achievements = {}
+            supabase.table('achievements').insert({'user_id': self.user_id, 'achievements': default_achievements}).execute()
+            return default_achievements
+            
+    def save_achievements(self, achievements: dict):
+        response = supabase.table('achievements').select('*').eq('user_id', self.user_id).execute()
+        if response.data and len(response.data) > 0:
+            supabase.table('achievements').update({'achievements': achievements}).eq('user_id', self.user_id).execute()
+        else:
+            supabase.table('achievements').insert({'user_id': self.user_id, 'achievements': achievements}).execute()
+
 
 class StartingPage(ctk.CTkFrame):
     def __init__(self, parent, controller):
@@ -366,6 +716,15 @@ class StartingPage(ctk.CTkFrame):
         self.settings_Button.place(x=start_x + 3 * (button_width + spacing), y=button_y)
         self.settings_Button.lift()
 
+        # Account button
+        self.account_button = ctk.CTkButton(
+            self,
+            text="Account",
+            image=ctk.CTkImage(Image.open(get_resource_path("icons/account.png")), size=(20, 20)),
+            command=lambda: controller.show_frame(AccountPage)
+        )
+        self.account_button.place(relx=0.8, rely=0.05, anchor="center")
+
 class MainPage(ctk.CTkFrame):
     def __init__(self, parent, controller):
         super().__init__(parent)
@@ -378,15 +737,8 @@ class MainPage(ctk.CTkFrame):
         self.bg_canvas = BackgroundCanvas(self)
         self.bg_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
         
-        # Load settings first
-        try:
-            with open(get_app_data_path('app_settings.json'), 'r') as f:
-                self.settings = json.load(f)
-        except FileNotFoundError:
-            self.settings = {
-                'progress_style': 'bars',
-                'sound': True
-            }
+        # Load settings
+        self.settings = self.get_settings()
         
         # Initialize audio
         mixer.init()
@@ -406,6 +758,7 @@ class MainPage(ctk.CTkFrame):
                 self.exhale_sound = mixer.Sound(get_resource_path(os.path.join("audio", "exhale.wav")))
             if os.path.exists(get_resource_path(os.path.join("audio", "background.wav"))):
                 self.background_music = mixer.Sound(get_resource_path(os.path.join("audio", "background.wav")))
+                # Check settings for sound before playing
                 if self.settings.get('sound', True):
                     self.background_music.play(-1)
         except Exception as e:
@@ -487,12 +840,9 @@ class MainPage(ctk.CTkFrame):
         for widget in self.progress_container.winfo_children():
             widget.destroy()
 
-        try:
-            with open(get_app_data_path('app_settings.json'), 'r') as f:
-                self.settings = json.load(f)
-        except FileNotFoundError:
-            self.settings = {'progress_style': 'bars'}
-
+        # Always get fresh settings when creating indicators
+        self.settings = self.get_settings()
+        
         if self.settings['progress_style'] == 'bars':
             self.progress_bars = []
             bar_width = 200
@@ -567,24 +917,49 @@ class MainPage(ctk.CTkFrame):
         self.animate_progress(2, 0, 8000, self.complete_cycle)
     
     def complete_cycle(self):
-        try:
-            with open(get_app_data_path('breathing_stats.json'), 'r') as f:
-                stats = json.load(f)
-        except FileNotFoundError:
-            stats = {}
-        
-        today = datetime.now().strftime('%Y-%m-%d')
-        
-        if today in stats:
-            stats[today] += 1
-        else:
-            stats[today] = 1
+        if hasattr(self.controller, 'data_handler') and self.controller.data_handler:
+            stats = self.controller.data_handler.get_stats()
             
-        with open(get_app_data_path('breathing_stats.json'), 'w') as f:
-            json.dump(stats, f)
+            today = datetime.now().strftime('%Y-%m-%d')
             
+            if today in stats:
+                stats[today] += 1
+            else:
+                stats[today] = 1
+            
+            # Save updated stats    
+            self.controller.data_handler.save_stats(stats)
+            
+            # Check for newly unlocked achievements
+            total_cycles = sum(stats.values())
+            unlocked_achievements = self.controller.data_handler.get_achievements()
+            
+            # Achievement definitions from AchievementsPage
+            achievement_definitions = self.controller.frames[AchievementsPage].achievements
+            
+            # Check for cycle-based achievements
+            for achievement_id, achievement in achievement_definitions.items():
+                if (not achievement_id.startswith("streak_") and 
+                    achievement_id not in unlocked_achievements and
+                    total_cycles >= achievement["requirement"]):
+                    
+                    # Unlock the achievement
+                    unlocked_achievements[achievement_id] = {
+                        'unlocked_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    
+                    # Show notification for new achievement
+                    if hasattr(self, 'Changing_text'):
+                        self.after(100, lambda: self.Changing_text.configure(
+                            text=f"Achievement Unlocked: {achievement['name']}"))
+                        self.after(3000, lambda: self.Changing_text.configure(text="Inhale"))
+            
+            # Save updated achievements
+            self.controller.data_handler.save_achievements(unlocked_achievements)
+        
+        # Continue with the next cycle
         self.start_inhale()
-    
+
     def animate_progress(self, segment, current, duration, callback):
         if current <= duration:
             progress = current / duration
@@ -607,6 +982,8 @@ class MainPage(ctk.CTkFrame):
         if not self.is_exercise_active or not self.winfo_viewable():
             return
             
+        # Get fresh settings to ensure we have the latest sound preference
+        self.settings = self.get_settings()
         if self.settings.get('sound', True) and hasattr(self, sound + '_sound'):
             sound_obj = getattr(self, sound + '_sound')
             if sound_obj:
@@ -630,6 +1007,8 @@ class MainPage(ctk.CTkFrame):
         self.scheduled_tasks.clear()
 
     def toggle_background_music(self, should_play):
+        # Get fresh settings to ensure we have the latest sound preference
+        self.settings = self.get_settings()
         if hasattr(self, 'background_music') and self.background_music:
             if should_play and self.settings.get('sound', True):
                 self.background_music.play(-1)
@@ -643,6 +1022,21 @@ class MainPage(ctk.CTkFrame):
             mixer.music.play(-1)  # -1 means loop indefinitely
         except Exception as e:
             logging.error(f"Error playing background music: {e}")
+
+    def get_settings(self):
+        if hasattr(self.controller, 'data_handler') and self.controller.data_handler:
+            return self.controller.data_handler.get_settings()
+        else:
+            # Default settings if no user is logged in
+            return {
+                'progress_style': 'bars',
+                'sound': True,
+                'breathing_times': {
+                    'inhale': 4,
+                    'hold': 7,
+                    'exhale': 8
+                }
+            }
 
 class StatsPage(ctk.CTkFrame):
     def __init__(self, parent, controller):
@@ -674,17 +1068,15 @@ class StatsPage(ctk.CTkFrame):
         self.graph_frame.place(relx=0.5, rely=0.4, anchor="center")
         
         self.update_graph()
-        self.display_statistics()
 
     def update_graph(self):
         for widget in self.graph_frame.winfo_children():
             widget.destroy()
 
-        try:
-            with open(get_app_data_path('breathing_stats.json'), 'r') as f:
-                stats = json.load(f)
-        except FileNotFoundError:
-            stats = {}
+        if self.controller.data_handler:
+            stats = self.controller.data_handler.get_stats()
+        else:
+            stats = {}  # Default empty stats if no user is logged in
 
         if not stats:
             no_data = ctk.CTkLabel(
@@ -698,6 +1090,17 @@ class StatsPage(ctk.CTkFrame):
         fig, ax = plt.subplots(figsize=(8, 4))
         dates = list(stats.keys())[-7:]
         counts = [stats.get(date, 0) for date in dates]
+        total_cycles = sum(stats.values())
+        streak = self.calculate_streak(stats)
+        stats_frame = ctk.CTkFrame(self)
+        stats_frame.place(relx=0.5, rely=0.8, anchor="center")
+
+        # Display statistics
+        cycle_label = ctk.CTkLabel(stats_frame, text=f"Total Cycles: {total_cycles}", font=("Arial", 16))
+        cycle_label.pack(pady=5)
+
+        streak_label = ctk.CTkLabel(stats_frame, text=f"Current Streak: {streak}", font=("Arial", 16))
+        streak_label.pack(pady=5)
         
         ax.bar(dates, counts)
         ax.set_xlabel('Date')
@@ -709,45 +1112,29 @@ class StatsPage(ctk.CTkFrame):
         canvas.draw()
         canvas.get_tk_widget().pack(fill="both", expand=True)
 
-    def display_statistics(self):
-        # Create a frame for statistics
-        stats_frame = ctk.CTkFrame(self)
-        stats_frame.place(relx=0.5, rely=0.8, anchor="center")
-
-        # Load statistics from the JSON file
-        try:
-            with open(get_app_data_path('breathing_stats.json'), 'r') as f:
-                stats = json.load(f)
-        except FileNotFoundError:
-            stats = {}
-
-        # Calculate total cycles and streak
-        total_cycles = sum(stats.values())
-        streak = self.calculate_streak(stats)
-
-        # Display statistics
-        cycle_label = ctk.CTkLabel(stats_frame, text=f"Total Cycles: {total_cycles}", font=("Arial", 16))
-        cycle_label.pack(pady=5)
-
-        streak_label = ctk.CTkLabel(stats_frame, text=f"Current Streak: {streak}", font=("Arial", 16))
-        streak_label.pack(pady=5)
-
-        # You can add duration if you have a way to track it
-        # For now, we'll just display a placeholder
-        duration_label = ctk.CTkLabel(stats_frame, text="Average Duration: N/A", font=("Arial", 16))
-        duration_label.pack(pady=5)
-
     def calculate_streak(self, stats):
         # Calculate the current streak of consecutive days
-        streak = 0
-        sorted_dates = sorted(stats.keys())
-        for i in range(len(sorted_dates) - 1):
-            if (datetime.strptime(sorted_dates[i + 1], '%Y-%m-%d') - 
-                datetime.strptime(sorted_dates[i], '%Y-%m-%d')).days == 1:
+        today = datetime.now().date()
+        dates = sorted([datetime.strptime(date, '%Y-%m-%d').date() for date in stats.keys()])
+        
+        if not dates:
+            return 0
+            
+        # Check if today is in the stats
+        if today in dates:
+            streak = 1
+        else:
+            return 0  # No exercise today, no streak
+            
+        prev_date = today
+        for date in sorted(dates, reverse=True):
+            if (prev_date - date).days == 1:
                 streak += 1
-            else:
+                prev_date = date
+            elif (prev_date - date).days > 1:
                 break
-        return streak + 1 if sorted_dates else 0  # Add 1 for the current day if there are any stats
+                
+        return streak
 
 class NotificationManager:
     def __init__(self):
@@ -756,27 +1143,28 @@ class NotificationManager:
         self.is_running = False
         self.last_notification_time = None
         self.settings_last_modified = None
-        try:
-            with open(get_app_data_path('notification_settings.json'), 'r') as f:
-                self.settings = json.load(f)
-                print(f"Loaded notification settings: {self.settings}")
-        except FileNotFoundError:
-            self.settings = {
-                'enabled': True,
-                'time': '09:00'
-            }
-            print("No settings file found, using defaults:", self.settings)
-            self.save_settings()
+        self.user_data_handler = None
+        
+        # Default settings
+        self.settings = {
+            'enabled': True,
+            'time': '09:00'
+        }
+        
+    def set_data_handler(self, data_handler):
+        self.user_data_handler = data_handler
+        if self.user_data_handler:
+            self.settings = self.user_data_handler.get_notification_settings()
+            print(f"Loaded notification settings: {self.settings}")
 
     def save_settings(self):
         print("Saving notification settings...")
-        try:
-            with open(get_app_data_path('notification_settings.json'), 'w') as f:
-                json.dump(self.settings, f)
-            print("Settings saved successfully")
+        if self.user_data_handler:
+            self.user_data_handler.save_notification_settings(self.settings)
+            print("Settings saved successfully to Supabase")
             self.last_notification_time = None  # Reset last notification time
-        except Exception as e:
-            print(f"Error saving settings: {e}")
+        else:
+            print("No data handler available to save settings")
 
     def start_notification_thread(self):
         print("Starting notification thread...")
@@ -795,17 +1183,13 @@ class NotificationManager:
         print("Notification thread stopped")
 
     def check_settings_updated(self):
-        try:
-            current_mtime = os.path.getmtime(get_app_data_path('notification_settings.json'))
-            if self.settings_last_modified != current_mtime:
-                with open(get_app_data_path('notification_settings.json'), 'r') as f:
-                    self.settings = json.load(f)
-                self.settings_last_modified = current_mtime
+        if self.user_data_handler:
+            current_settings = self.user_data_handler.get_notification_settings()
+            if current_settings != self.settings:
+                self.settings = current_settings
                 self.last_notification_time = None  # Reset last notification time
-                print("Settings updated:", self.settings)
+                print("Settings updated from Supabase:", self.settings)
                 return True
-        except Exception as e:
-            print(f"Error checking settings: {e}")
         return False
 
     def should_send_notification(self):
@@ -904,22 +1288,7 @@ class SettingsPage(ctk.CTkFrame):
         self.scrollable_frame.place(relx=0.5, rely=0.5, anchor="center")
 
         # Load settings
-        try:
-            with open(get_app_data_path('app_settings.json'), 'r') as f:
-                self.settings = json.load(f)
-        except FileNotFoundError:
-            self.settings = {
-                'theme': 'dark',
-                'sound': True,
-                'breathing_times': {
-                    'inhale': 4,
-                    'hold': 7,
-                    'exhale': 8
-                },
-                'notifications': True,
-                'progress_style': 'bars'
-            }
-            self.save_settings()
+        self.settings = self.get_settings()
 
         # Create frames for different setting sections
         general_frame = ctk.CTkFrame(self.scrollable_frame)
@@ -1017,14 +1386,7 @@ class SettingsPage(ctk.CTkFrame):
         notification_label.pack(pady=10)
 
         # Load notification settings
-        try:
-            with open(get_app_data_path('notification_settings.json'), 'r') as f:
-                self.notification_settings = json.load(f)
-        except FileNotFoundError:
-            self.notification_settings = {
-                'enabled': True,
-                'time': '09:00'
-            }
+        self.notification_settings = self.get_notification_settings()
 
         # Notification switch
         notification_switch_frame = ctk.CTkFrame(notification_frame)
@@ -1080,6 +1442,33 @@ class SettingsPage(ctk.CTkFrame):
         self.back_button.place(relx=0.5, rely=0.9, anchor="center")
         self.back_button.lift()
 
+    def get_settings(self):
+        if self.controller.data_handler:
+            return self.controller.data_handler.get_settings()
+        else:
+            # Default settings if no user is logged in
+            return {
+                'theme': 'dark',
+                'sound': True,
+                'breathing_times': {
+                    'inhale': 4,
+                    'hold': 7,
+                    'exhale': 8
+                },
+                'notifications': True,
+                'progress_style': 'bars'
+            }
+
+    def get_notification_settings(self):
+        if self.controller.data_handler:
+            return self.controller.data_handler.get_notification_settings()
+        else:
+            # Default notification settings if no user is logged in
+            return {
+                'enabled': True,
+                'time': '09:00'
+            }
+
     def toggle_theme(self):
         self.settings['theme'] = 'dark' if self.theme_switch.get() else 'light'
         # Update theme immediately
@@ -1106,14 +1495,48 @@ class SettingsPage(ctk.CTkFrame):
         self.settings['sound'] = self.sound_switch.get()
         self.save_settings()
         
-        # Update sound state immediately
+        # Update sound state immediately in MainPage
         main_page = self.controller.frames[MainPage]
-        main_page.toggle_background_music(self.settings['sound'])
+        if main_page:
+            main_page.settings = self.settings  # Update MainPage settings
+            main_page.toggle_background_music(self.sound_switch.get())
 
     def change_progress_style(self, choice):
         self.settings['progress_style'] = choice
         self.save_settings()
+        
+        # Immediately update MainPage settings
+        if self.controller.frames[MainPage]:
+            self.controller.frames[MainPage].settings = self.settings
 
+    def refresh_settings_from_database(self):
+        """Reload settings from database and update UI elements"""
+        if self.controller.data_handler:
+            self.settings = self.controller.data_handler.get_settings()
+            self.notification_settings = self.controller.data_handler.get_notification_settings()
+            
+            # Update UI to reflect current settings
+            self.theme_switch.select() if self.settings['theme'] == 'dark' else self.theme_switch.deselect()
+            self.sound_switch.select() if self.settings.get('sound', True) else self.sound_switch.deselect()
+            
+            # Update breathing times
+            self.inhale_entry.delete(0, 'end')
+            self.inhale_entry.insert(0, str(self.settings['breathing_times']['inhale']))
+            self.hold_entry.delete(0, 'end')
+            self.hold_entry.insert(0, str(self.settings['breathing_times']['hold']))
+            self.exhale_entry.delete(0, 'end')
+            self.exhale_entry.insert(0, str(self.settings['breathing_times']['exhale']))
+            
+            # Update progress style dropdown
+            self.style_var.set(self.settings['progress_style'])
+            
+            # Update notification settings
+            self.notification_switch.select() if self.notification_settings['enabled'] else self.notification_switch.deselect()
+            time_parts = self.notification_settings['time'].split(':')
+            if len(time_parts) == 2:
+                self.hours_var.set(time_parts[0])
+                self.minutes_var.set(time_parts[1])
+    
     def save_changes(self):
         try:
             self.settings['breathing_times']['inhale'] = int(self.inhale_entry.get())
@@ -1121,12 +1544,26 @@ class SettingsPage(ctk.CTkFrame):
             self.settings['breathing_times']['exhale'] = int(self.exhale_entry.get())
             self.save_settings()
             messagebox.showinfo("Success", "Settings saved successfully!")
+            
+            # Immediately apply settings to MainPage
+            if self.controller.frames[MainPage]:
+                self.controller.frames[MainPage].settings = self.settings
+            
         except ValueError:
             messagebox.showerror("Error", "Please enter valid numbers for breathing times")
-
+    
+    def change_progress_style(self, choice):
+        self.settings['progress_style'] = choice
+        self.save_settings()
+        
+        # Immediately update MainPage settings
+        if self.controller.frames[MainPage]:
+            self.controller.frames[MainPage].settings = self.settings
+    
     def save_settings(self):
-        with open(get_app_data_path('app_settings.json'), 'w') as f:
-            json.dump(self.settings, f)
+        if self.controller.data_handler:
+            self.controller.data_handler.save_settings(self.settings)
+        # If no data handler, settings won't be saved (logged out state)
 
     def toggle_notifications(self):
         self.notification_settings['enabled'] = self.notification_switch.get()
@@ -1142,8 +1579,9 @@ class SettingsPage(ctk.CTkFrame):
             self.save_notification_settings()
     
     def save_notification_settings(self):
-        with open(get_app_data_path('notification_settings.json'), 'w') as f:
-            json.dump(self.notification_settings, f)
+        if self.controller.data_handler:
+            self.controller.data_handler.save_notification_settings(self.notification_settings)
+        # If no data handler, settings won't be saved (logged out state)
 
 class CircleProgress(ctk.CTkCanvas):
     def __init__(self, parent, size=200, **kwargs):
@@ -1240,18 +1678,68 @@ class AchievementsPage(ctk.CTkFrame):
         super().__init__(parent)
         self.controller = controller
         
+        # Define achievements dictionary - this is our achievement definitions, not unlocked achievements
+        self.achievements = {
+            "first_breath": {
+                "name": "First Breath",
+                "description": "Complete your first breathing exercise",
+                "icon": "🌱",
+                "requirement": 1
+            },
+            "beginner": {
+                "name": "Beginner",
+                "description": "Complete 10 breathing exercises",
+                "icon": "🌿",
+                "requirement": 10
+            },
+            "intermediate": {
+                "name": "Intermediate",
+                "description": "Complete 50 breathing exercises",
+                "icon": "🌳",
+                "requirement": 50
+            },
+            "advanced": {
+                "name": "Advanced",
+                "description": "Complete 100 breathing exercises",
+                "icon": "🌲",
+                "requirement": 100
+            },
+            "master": {
+                "name": "Breath Master",
+                "description": "Complete 500 breathing exercises",
+                "icon": "🏆",
+                "requirement": 500
+            },
+            "streak_3": {
+                "name": "Consistent",
+                "description": "Maintain a 3-day streak",
+                "icon": "📆",
+                "requirement": 3
+            },
+            "streak_7": {
+                "name": "Dedicated",
+                "description": "Maintain a 7-day streak",
+                "icon": "🔥",
+                "requirement": 7
+            },
+            "streak_30": {
+                "name": "Committed",
+                "description": "Maintain a 30-day streak",
+                "icon": "⭐",
+                "requirement": 30
+            }
+        }
+        
         # Add background canvas
         self.bg_canvas = BackgroundCanvas(self)
         self.bg_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
         
         # Title
-        self.title = ctk.CTkLabel(
-            self,
-            text="Achievements",
-            font=("Arial", 30, "bold")
+        self.title_label = ctk.CTkLabel(
+            self, text="Achievements", font=("Arial", 30, "bold")
         )
-        self.title.place(relx=0.5, rely=0.05, anchor="center")
-        self.title.lift()
+        self.title_label.place(relx=0.5, rely=0.05, anchor="center")
+        self.title_label.lift()
 
         # Create scrollable frame for achievements
         self.scrollable_frame = ctk.CTkScrollableFrame(
@@ -1271,47 +1759,31 @@ class AchievementsPage(ctk.CTkFrame):
         self.back_button.place(relx=0.5, rely=0.9, anchor="center")
         self.back_button.lift()
 
-        # Define achievements
-        self.achievements = {
-            'beginner': {
-                'name': 'Getting Started',
-                'description': 'Complete your first breathing exercise',
-                'requirement': 1,
-                'icon': '🌱'
-            },
-            'intermediate': {
-                'name': 'Regular Breather',
-                'description': 'Complete 50 breathing exercises',
-                'requirement': 50,
-                'icon': '🌿'
-            },
-            'advanced': {
-                'name': 'Breathing Master',
-                'description': 'Complete 100 breathing exercises',
-                'requirement': 100,
-                'icon': '🌳'
-            },
-            'streak_3': {
-                'name': 'Consistent',
-                'description': 'Maintain a 3-day streak',
-                'requirement': 3,
-                'icon': '🔥'
-            },
-            'streak_7': {
-                'name': 'Weekly Warrior',
-                'description': 'Maintain a 7-day streak',
-                'requirement': 7,
-                'icon': '🏆'
-            },
-            'streak_30': {
-                'name': 'Monthly Master',
-                'description': 'Maintain a 30-day streak',
-                'requirement': 30,
-                'icon': '👑'
-            }
-        }
-
         self.update_achievements()
+
+    def calculate_streak(self, stats):
+        # Calculate the current streak of consecutive days
+        today = datetime.now().date()
+        dates = sorted([datetime.strptime(date, '%Y-%m-%d').date() for date in stats.keys()])
+        
+        if not dates:
+            return 0
+            
+        # Check if today is in the stats
+        if today in dates:
+            streak = 1
+        else:
+            return 0  # No exercise today, no streak
+            
+        prev_date = today
+        for date in sorted(dates, reverse=True):
+            if (prev_date - date).days == 1:
+                streak += 1
+                prev_date = date
+            elif (prev_date - date).days > 1:
+                break
+                
+        return streak
 
     def update_achievements(self):
         # Clear existing achievements display
@@ -1319,90 +1791,144 @@ class AchievementsPage(ctk.CTkFrame):
             widget.destroy()
 
         # Load user stats
-        try:
-            with open(get_app_data_path('breathing_stats.json'), 'r') as f:
-                stats = json.load(f)
-        except FileNotFoundError:
-            stats = {}
+        stats = {}
+        if hasattr(self.controller, 'data_handler') and self.controller.data_handler:
+            stats = self.controller.data_handler.get_stats()
 
         # Calculate total cycles and current streak
-        total_cycles = sum(stats.values())
+        total_cycles = sum(stats.values()) if stats else 0
         current_streak = self.calculate_streak(stats)
 
-        # Load unlocked achievements
-        try:
-            with open(get_app_data_path('achievements.json'), 'r') as f:
-                unlocked = json.load(f)
-        except FileNotFoundError:
-            unlocked = {}
+        # Load unlocked achievements from database
+        unlocked_achievements = {}
+        if hasattr(self.controller, 'data_handler') and self.controller.data_handler:
+            unlocked_achievements = self.controller.data_handler.get_achievements()
+            print(f"Loaded achievements from database: {unlocked_achievements}")  # Debugging
 
-        # Check and display each achievement
+        # Display achievements
         for i, (achievement_id, achievement) in enumerate(self.achievements.items()):
-            # Create frame for each achievement
+            # Check if achievement is unlocked
+            is_unlocked = False
+            unlock_date = None
+            
+            # If already in unlocked achievements
+            if achievement_id in unlocked_achievements:
+                is_unlocked = True
+                # Handle the unlocked_at value - it could be a string or a nested dictionary
+                if isinstance(unlocked_achievements[achievement_id], dict):
+                    unlock_date = unlocked_achievements[achievement_id].get('unlocked_at', 'Unknown date')
+                else:
+                    unlock_date = unlocked_achievements[achievement_id]
+            # Or if meets requirements now
+            elif achievement_id.startswith("streak_"):
+                req_streak = achievement["requirement"]
+                if current_streak >= req_streak:
+                    is_unlocked = True
+            else:
+                # Check total cycles for other achievements
+                if total_cycles >= achievement["requirement"]:
+                    is_unlocked = True
+            
+            # Update unlocked achievements in database if newly unlocked
+            if is_unlocked and achievement_id not in unlocked_achievements and hasattr(self.controller, 'data_handler') and self.controller.data_handler:
+                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                unlocked_achievements[achievement_id] = {
+                    'unlocked_at': current_time
+                }
+                # Save to database
+                self.controller.data_handler.save_achievements(unlocked_achievements)
+                unlock_date = current_time
+                print(f"New achievement unlocked: {achievement_id} at {unlock_date}")  # Debugging
+            
+            # Create achievement frame
             achievement_frame = ctk.CTkFrame(self.scrollable_frame)
-            achievement_frame.pack(fill="x", padx=10, pady=5)
-
-            # Icon and name
+            achievement_frame.pack(fill="x", padx=10, pady=5, ipady=5)
+            
+            # Icon
             icon_label = ctk.CTkLabel(
-                achievement_frame,
-                text=achievement['icon'],
-                font=("Arial", 24)
+                achievement_frame, 
+                text=achievement["icon"], 
+                font=("Arial", 28)
             )
             icon_label.pack(side="left", padx=10)
-
-            # Achievement details
-            details_frame = ctk.CTkFrame(achievement_frame)
-            details_frame.pack(side="left", fill="x", expand=True, padx=10)
-
-            name_label = ctk.CTkLabel(
-                details_frame,
-                text=achievement['name'],
+            
+            # Achievement info
+            info_frame = ctk.CTkFrame(achievement_frame, fg_color="transparent")
+            info_frame.pack(side="left", fill="x", expand=True, padx=10)
+            
+            # Title
+            title_label = ctk.CTkLabel(
+                info_frame, 
+                text=achievement["name"], 
                 font=("Arial", 16, "bold")
             )
-            name_label.pack(anchor="w")
-
+            title_label.pack(anchor="w")
+            
+            # Description
             desc_label = ctk.CTkLabel(
-                details_frame,
-                text=achievement['description'],
+                info_frame, 
+                text=achievement["description"],
                 font=("Arial", 12)
             )
             desc_label.pack(anchor="w")
-
-            # Check if achievement is unlocked
-            is_unlocked = False
-            if 'streak' in achievement_id:
-                requirement = achievement['requirement']
-                is_unlocked = current_streak >= requirement
+            
+            # Status
+            status_frame = ctk.CTkFrame(achievement_frame, fg_color="transparent")
+            status_frame.pack(side="right", padx=10)
+            
+            if is_unlocked:
+                status_label = ctk.CTkLabel(
+                    status_frame, 
+                    text="UNLOCKED", 
+                    font=("Arial", 14, "bold"),
+                    text_color="#4CAF50"
+                )
+                status_label.pack()
+                
+                if unlock_date:
+                    try:
+                        # Handle different date formats
+                        if isinstance(unlock_date, str):
+                            if ' ' in unlock_date:
+                                # Format like "2023-01-01 12:34:56"
+                                date_part = unlock_date.split(' ')[0]
+                            else:
+                                # Already just the date part
+                                date_part = unlock_date
+                        else:
+                            date_part = str(unlock_date)
+                            
+                        date_label = ctk.CTkLabel(
+                            status_frame,
+                            text=f"on {date_part}",
+                            font=("Arial", 10)
+                        )
+                        date_label.pack()
+                    except Exception as e:
+                        print(f"Error displaying date: {e}, date value: {unlock_date}")
             else:
-                is_unlocked = total_cycles >= achievement['requirement']
-
-            # Status indicator
-            status_label = ctk.CTkLabel(
-                achievement_frame,
-                text="✅" if is_unlocked else "🔒",
-                font=("Arial", 24)
-            )
-            status_label.pack(side="right", padx=10)
-
-            # Update unlocked achievements
-            if is_unlocked and achievement_id not in unlocked:
-                unlocked[achievement_id] = {
-                    'unlocked_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
-                # Save updated achievements
-                with open(get_app_data_path('achievements.json'), 'w') as f:
-                    json.dump(unlocked, f)
-
-    def calculate_streak(self, stats):
-        streak = 0
-        sorted_dates = sorted(stats.keys())
-        for i in range(len(sorted_dates) - 1):
-            if (datetime.strptime(sorted_dates[i + 1], '%Y-%m-%d') - 
-                datetime.strptime(sorted_dates[i], '%Y-%m-%d')).days == 1:
-                streak += 1
-            else:
-                break
-        return streak + 1 if sorted_dates else 0
+                status_label = ctk.CTkLabel(
+                    status_frame, 
+                    text="LOCKED", 
+                    font=("Arial", 14, "bold"),
+                    text_color="#F44336"
+                )
+                status_label.pack()
+                
+                if achievement_id.startswith("streak_"):
+                    progress_label = ctk.CTkLabel(
+                        status_frame,
+                        text=f"{current_streak}/{achievement['requirement']} days",
+                        font=("Arial", 10)
+                    )
+                    progress_label.pack()
+                else:
+                    progress_label = ctk.CTkLabel(
+                        status_frame,
+                        text=f"{total_cycles}/{achievement['requirement']} cycles",
+                        font=("Arial", 10)
+                    )
+                    progress_label.pack()
 
 class HelpPage(ctk.CTkFrame):
     def __init__(self, parent, controller):
@@ -1487,6 +2013,220 @@ class HelpPage(ctk.CTkFrame):
         )
         self.back_button.place(relx=0.5, rely=0.9, anchor="center")
         self.back_button.lift()
+
+class AccountPage(ctk.CTkFrame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        
+        # Add background canvas
+        self.bg_canvas = BackgroundCanvas(self)
+        self.bg_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
+        
+        # Title
+        self.title_label = ctk.CTkLabel(
+            self, text="Account Settings", font=("Arial", 30, "bold")
+        )
+        self.title_label.place(relx=0.5, rely=0.1, anchor="center")
+        self.title_label.lift()
+        
+        # Create main frame
+        self.main_frame = ctk.CTkFrame(self, width=500, height=300)
+        self.main_frame.place(relx=0.5, rely=0.45, anchor="center")
+        
+        # We'll load the user info when the page is shown, not in init
+        
+        # Back button
+        self.back_button = ctk.CTkButton(
+            self,
+            text="Back",
+            image=ctk.CTkImage(Image.open(get_resource_path("icons/back.png")), size=(20, 20)),
+            command=lambda: controller.show_frame(StartingPage)
+        )
+        self.back_button.place(relx=0.5, rely=0.85, anchor="center")
+    
+    def load_user_info(self):
+        """Load user info from Supabase"""
+        # Clear previous content
+        for widget in self.main_frame.winfo_children():
+            widget.destroy()
+            
+        # Check if logged in
+        if not hasattr(self.controller, 'data_handler') or self.controller.data_handler is None:
+            not_logged_in = ctk.CTkLabel(
+                self.main_frame,
+                text="You are not logged in",
+                font=("Arial", 16)
+            )
+            not_logged_in.pack(pady=50)
+            return
+            
+        try:
+            # Get user info from Supabase
+            user = supabase.auth.get_user()
+            email = user.user.email if user and hasattr(user, 'user') else "Unknown"
+            
+            email_label = ctk.CTkLabel(
+                self.main_frame,
+                text=f"Email: {email}",
+                font=("Arial", 16)
+            )
+            email_label.pack(pady=20)
+            
+            # Add logout button
+            logout_button = ctk.CTkButton(
+                self.main_frame,
+                text="Logout",
+                command=self.logout
+            )
+            logout_button.pack(pady=10)
+            
+            # Add reset password button 
+            reset_password_button = ctk.CTkButton(
+                self.main_frame,
+                text="Reset Password",
+                command=self.reset_password
+            )
+            reset_password_button.pack(pady=20)
+            
+            # Add delete account button with warning
+            delete_account_button = ctk.CTkButton(
+                self.main_frame,
+                text="Delete Account",
+                fg_color="#FF5252",
+                hover_color="#FF0000",
+                command=self.confirm_delete_account
+            )
+            delete_account_button.pack(pady=10)
+            
+        except Exception as e:
+            error_label = ctk.CTkLabel(
+                self.main_frame,
+                text=f"Error loading user info: {str(e)}",
+                text_color="#FF0000"
+            )
+            error_label.pack(pady=20)
+    
+    def logout(self):
+        """Log out the current user"""
+        self.controller.logout()
+    
+    def reset_password(self):
+        """Show password reset dialog"""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Reset Password")
+        dialog.geometry("400x200")
+        dialog.resizable(False, False)
+        dialog.transient(self)  # Set to be on top of the parent window
+        dialog.grab_set()  # Modal
+        
+        # New password
+        new_label = ctk.CTkLabel(dialog, text="New Password:")
+        new_label.pack(pady=(20, 5))
+        new_entry = ctk.CTkEntry(dialog, width=300, show="*")
+        new_entry.pack()
+        
+        # Confirm new password
+        confirm_label = ctk.CTkLabel(dialog, text="Confirm New Password:")
+        confirm_label.pack(pady=(10, 5))
+        confirm_entry = ctk.CTkEntry(dialog, width=300, show="*")
+        confirm_entry.pack()
+        
+        # Status message
+        status_label = ctk.CTkLabel(dialog, text="")
+        status_label.pack(pady=10)
+        
+        # Submit button
+        def change_password():
+            new = new_entry.get()
+            confirm = confirm_entry.get()
+            
+            if not new or not confirm:
+                status_label.configure(text="Please fill all fields", text_color="#FF0000")
+                return
+                
+            if new != confirm:
+                status_label.configure(text="New passwords don't match", text_color="#FF0000")
+                return
+                
+            try:
+                # Change password using Supabase
+                response = supabase.auth.update_user({"password": new})
+                status_label.configure(text="Password changed successfully!", text_color="#00FF00")
+                self.controller.after(2000, dialog.destroy)
+            except Exception as e:
+                status_label.configure(text=f"Error: {str(e)}", text_color="#FF0000")
+        
+        submit_button = ctk.CTkButton(dialog, text="Change Password", command=change_password)
+        submit_button.pack(pady=10)
+    
+    def confirm_delete_account(self):
+        """Show confirmation dialog for account deletion"""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Confirm Account Deletion")
+        dialog.geometry("400x200")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        warning_label = ctk.CTkLabel(
+            dialog,
+            text="WARNING: This action cannot be undone!\nAll your data will be permanently deleted.",
+            text_color="#FF0000",
+            font=("Arial", 14, "bold")
+        )
+        warning_label.pack(pady=20)
+        
+        # Password confirmation
+        password_label = ctk.CTkLabel(dialog, text="Enter your password to confirm:")
+        password_label.pack(pady=5)
+        password_entry = ctk.CTkEntry(dialog, width=300, show="*")
+        password_entry.pack()
+        
+        status_label = ctk.CTkLabel(dialog, text="")
+        status_label.pack(pady=10)
+        
+        def delete_account():
+            password = password_entry.get()
+            if not password:
+                status_label.configure(text="Please enter your password", text_color="#FF0000")
+                return
+                
+            try:
+                # Delete account from Supabase
+                supabase.auth.delete_user()
+                
+                # Delete all user data from tables
+                if self.controller.data_handler:
+                    user_id = self.controller.data_handler.user_id
+                    supabase.table("app_settings").delete().eq("user_id", user_id).execute()
+                    supabase.table("breathing_stats").delete().eq("user_id", user_id).execute()
+                    supabase.table("achievements").delete().eq("user_id", user_id).execute()
+                    supabase.table("notification_settings").delete().eq("user_id", user_id).execute()
+                
+                status_label.configure(text="Account deleted successfully!", text_color="#00FF00")
+                self.controller.after(2000, lambda: [dialog.destroy(), self.controller.logout()])
+            except Exception as e:
+                status_label.configure(text=f"Error: {str(e)}", text_color="#FF0000")
+        
+        buttons_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons_frame.pack(pady=10, fill="x")
+        
+        cancel_button = ctk.CTkButton(
+            buttons_frame,
+            text="Cancel",
+            command=dialog.destroy
+        )
+        cancel_button.pack(side="left", padx=20, expand=True)
+        
+        delete_button = ctk.CTkButton(
+            buttons_frame,
+            text="Delete Account",
+            fg_color="#FF5252",
+            hover_color="#FF0000",
+            command=delete_account
+        )
+        delete_button.pack(side="right", padx=20, expand=True)
 
 if __name__ == "__main__":
     app = App()
