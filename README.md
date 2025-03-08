@@ -12,12 +12,14 @@ A tool for helping people with mental health issues.
 - notification system
 - settings
 - help page
+- account system
+- cloud storage
 
 ## How to run/Installation
 
 coming soon on the microsoft store...
 
-or downlaod the latest release(v1.0.1) from the releases page. and run the exe file.
+or downlaod the latest release(v1.0.2) from the releases page. and run the exe file.
 
 ## Python Installation
 
